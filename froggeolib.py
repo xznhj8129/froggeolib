@@ -4,22 +4,56 @@ import math
 import geojson
 import json
 
+# monkey patch since this is fucking retarded
+_original_default = json.JSONEncoder().default
+
+def _patched_default(self, obj):
+    if hasattr(obj, 'json') and callable(obj.json):
+        return obj.json()
+    return _original_default(obj)
+
+json.JSONEncoder.default = _patched_default
+
+class PosObject():
+    def __init__(self, lat:float, lon:float, alt):
+        self.lat = lat
+        self.lon = lon
+        self.alt = float(alt)
+
+
 class GPSposition():
     def __init__(self, lat:float, lon:float, alt):
         self.lat = lat
         self.lon = lon
         self.alt = float(alt)
+
     def __str__(self):
         s = "Lattitude: {:.8f} Longitude: {:.8f} Altitude: {:.3f}".format(self.lat, self.lon, self.alt)
         return s
+
+    def __json__(self):
+        return self.json()
+    def __dict__(self):
+        return self.json()
+
     def latlon(self):
         return (self.lat, self.lon)
+
+    def mgrs(self):
+        milobj = mgrs.MGRS()
+        return milobj.toMGRS(self.lat,self.lon)
+
     def json(self):
-        return json.dumps({
+        return {
             "lat": self.lat,
             "lon": self.lon,
             "alt": self.alt
-        })
+        }
+
+    #def __setstate__(self, state):
+        # Called when the object is being deserialized
+    #    self.__dict__.update(state)
+    #    self.non_serializable_attribute = None 
 
 class PosVector():
     def __init__(self, distance, azimuth, elevation):
@@ -56,9 +90,9 @@ def convert_geopaste(string):
     x = string.split(';')[0].split(':')[1].split(',')
     return GPSposition(float(x[0]),float(x[1]),float(0))
 
-def latlon_to_mgrs(latlon):
+def latlon_to_mgrs(latlon,alt=0):
     milobj = mgrs.MGRS()
-    return milobj.toMGRS(latlon.lat,latlon.lon,0)
+    return milobj.toMGRS(latlon.lat,latlon.lon, alt)
 
 def mgrs_to_latlon(milgrid):
     milobj = mgrs.MGRS()
@@ -97,3 +131,63 @@ def vector_rangefinder_to_gps_air(latlon, az, ang, slantrange):
     truerange = math.cos(math.radians(ang))*slantrange
     g = geod.Direct(latlon.lat, latlon.lon, az, truerange)
     return GPSposition(float(g['lat2']),float(g['lon2']),float(0))
+
+
+def distance_m(p1: GPSposition, p2: GPSposition) -> float:
+    inv = geod.Inverse(p1.lat, p1.lon, p2.lat, p2.lon)
+    return inv["s12"]
+
+def to_local_xy(origin: GPSposition, point: GPSposition):
+    """
+    Projects 'point' into a local tangent plane with 'origin' as (0, 0).
+    x-axis points East, y-axis points North (approx).
+    """
+    inv = geod.Inverse(origin.lat, origin.lon, point.lat, point.lon)
+    dist = inv["s12"]
+    az   = inv["azi1"]  # azimuth from origin to point, relative to north
+    azr  = math.radians(az)
+    x = dist * math.sin(azr)  # East
+    y = dist * math.cos(azr)  # North
+    return x, y
+
+def point_in_polygon(point: GPSposition, polygon: list[GPSposition]) -> bool:
+    """
+    Ray casting in a local 2D plane around the first polygon vertex.
+    """
+    # Project all polygon vertices + the point to local XY
+    origin = polygon[0]
+    poly_xy = [to_local_xy(origin, v) for v in polygon]
+    px, py  = to_local_xy(origin, point)
+
+    # Standard ray-casting count
+    inside = False
+    for i in range(len(poly_xy)):
+        x1, y1 = poly_xy[i]
+        x2, y2 = poly_xy[(i + 1) % len(poly_xy)]
+        cond = ((y1 > py) != (y2 > py)) and (
+            px < (x2 - x1) * (py - y1) / (y2 - y1) + x1
+        )
+        if cond:
+            inside = not inside
+    return inside
+
+def point_in_shape(pos: GPSposition, shape_def: dict) -> bool:
+    """
+    shape_def examples:
+      {"shape": "circle",  "points": [center],             "size": 100}
+      {"shape": "polygon", "points": [p1,p2,..., pN],      "size": None}
+    """
+    shape_type = shape_def["shape"]
+    points     = shape_def["points"]
+    size       = shape_def["size"]
+
+    if shape_type == "circle":
+        center = points[0]
+        radius_m = size
+        return distance_m(center, pos) <= radius_m
+
+    elif shape_type == "polygon":
+        return point_in_polygon(pos, points)
+
+    else:
+        raise ValueError(f"Unsupported shape type: {shape_type}")
