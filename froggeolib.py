@@ -1,3 +1,5 @@
+from __future__ import annotations
+# froggeolib
 from geographiclib.geodesic import Geodesic
 import mgrs
 import math
@@ -22,13 +24,45 @@ class PosObject():
 
 
 class GPSposition():
-    def __init__(self, lat:float, lon:float, alt):
-        self.lat = lat
-        self.lon = lon
-        self.alt = float(alt)
+    def __init__(self, lat:float, lon:float, alt:float, ce:float = 0.0, le:float = 0.0, json:dict={}, tup:tuple=()):
+        if lat and lon:
+            self.lat = lat
+            self.lon = lon
+            if alt:
+                self.alt = float(alt)
+            else:
+                self.alt = 0.0
+            self.ce = ce
+            self.le = le
+                
+        elif json:
+            self.lat = float(json["lat"])
+            self.lon = float(json["lon"])
+            self.alt = float(json["alt"])
+            if "ce" in json:
+                self.ce = ce
+            if "le" in json:
+                self.le = le
+        elif tup:
+            self.lat = float(tup[0])
+            self.lon = float(tup[1])
+            if len(tup)==3:
+                self.alt = float(tup[3])
+            if len(tup)==5:
+                self.ce = float(tup[4])
+                self.le = float(tup[5])
+        else:
+            self.lat = 0.0
+            self.lon = 0.0
+            self.alt = 0.0
+            self.ce = 0.0
+            self.le = 0.0
 
     def __str__(self):
-        s = "Lattitude: {:.8f} Longitude: {:.8f} Altitude: {:.3f}".format(self.lat, self.lon, self.alt)
+        if self.ce>0:
+            s = "Lattitude: {:.8f} Longitude: {:.8f} Altitude: {:.3f} CE: {:.1f} LE: {:.1f}".format(self.lat, self.lon, self.alt, self.ce, self.le)
+        else:
+            s = "Lattitude: {:.8f} Longitude: {:.8f} Altitude: {:.3f}".format(self.lat, self.lon, self.alt)
         return s
 
     def __json__(self):
@@ -47,7 +81,9 @@ class GPSposition():
         return {
             "lat": self.lat,
             "lon": self.lon,
-            "alt": self.alt
+            "alt": self.alt,
+            "ce": self.ce,
+            "le": self.le
         }
 
     #def __setstate__(self, state):
@@ -119,7 +155,7 @@ def vector_to_gps(latlon, dist, az):
     g = geod.Direct(latlon.lat, latlon.lon, az, dist)
     return GPSposition(float(g['lat2']),float(g['lon2']),float(0))
 
-def vector_to_gps_air(latlon, az, ang): #only valid if both points are at same altitude
+def vector_to_gps_air(latlon, az, ang): #only valid if both points are at same ground level
     geod = Geodesic.WGS84
     truerange = math.tan(math.radians(ang)) * latlon.alt
     slantrange = latlon.alt / math.cos(math.radians(ang))
@@ -191,3 +227,105 @@ def point_in_shape(pos: GPSposition, shape_def: dict) -> bool:
 
     else:
         raise ValueError(f"Unsupported shape type: {shape_type}")
+
+def image_point_to_gps(pos, h, fov, heading, norm_x, norm_y, offset_u=0, offset_v=0):
+    """
+    Computes the ground GPS coordinate from a selected point in a downward-looking image,
+    where the point is given as normalized coordinates (0 to 1, with 0 at left/top).
+
+    Parameters:
+      pos: dict with "lat", "lon", (and optionally "alt")
+      h: altitude (in meters)
+      fov: tuple (horizontal_fov, vertical_fov) in degrees (use your optimized FOV values)
+      heading: heading in degrees (0° = north, increasing clockwise)
+      norm_x, norm_y: normalized image coordinates (0 to 1, 0=left/top)
+      offset_u: additional horizontal (u) offset in meters (from calibration)
+      offset_v: additional vertical (v) offset in meters (from calibration)
+
+    Returns:
+      A GPS coordinate (as returned by vector_to_gps().json())
+    """
+    import math
+
+    fov_h, fov_v = fov
+
+    # Calculate ground half-extents based on effective (optimized) FOV.
+    half_ground_width  = h * math.tan(math.radians(fov_h / 2))
+    half_ground_height = h * math.tan(math.radians(fov_v / 2))
+    
+    # Compute offsets from the image center.
+    # For normalized coordinates (0 to 1) the center is at 0.5.
+    # Multiply by 2*half_extent to get the displacement in meters.
+    # Then add the optimized offsets.
+    u = (norm_x - 0.5) * 2 * half_ground_width + offset_u
+    # Invert the y-axis because 0 is at the top.
+    v = -(norm_y - 0.5) * 2 * half_ground_height + offset_v
+
+    # Rotate the offset vector by the heading.
+    heading_rad = math.radians(heading)
+    east_offset  = u * math.cos(heading_rad) + v * math.sin(heading_rad)
+    north_offset = -u * math.sin(heading_rad) + v * math.cos(heading_rad)
+    
+    # Compute the ground distance and azimuth.
+    dist = math.hypot(east_offset, north_offset)
+    az = (math.degrees(math.atan2(east_offset, north_offset)) + 360) % 360
+
+    # Convert the computed vector into a GPS coordinate.
+    current_position = GPSposition(pos["lat"], pos["lon"], 0)
+    return vector_to_gps(current_position, dist, az)
+
+def gps_to_image_point(cam_pos, gps, h, fov, heading, offset_u=0, offset_v=0):
+    """
+    Converts a GPS coordinate back into normalized image coordinates.
+    
+    This function is the inverse of image_point_to_gps(). Given a GPS coordinate (as computed
+    by image_point_to_gps()) along with the camera parameters (position, altitude, FOV, heading,
+    and calibration offsets), it computes the normalized (0 to 1) x,y coordinates corresponding 
+    to that point in the image.
+    
+    Parameters:
+      cam_pos: dict with "lat", "lon", (and optionally "alt") representing the camera's ground position
+      gps: GPS coordinate (an object with attributes "lat" and "lon") to convert back into image space
+      h: altitude in meters
+      fov: tuple (horizontal_fov, vertical_fov) in degrees (use your optimized FOV values)
+      heading: heading in degrees (0° = north, increasing clockwise)
+      offset_u: additional horizontal (u) offset in meters (from calibration)
+      offset_v: additional vertical (v) offset in meters (from calibration)
+    
+    Returns:
+      A tuple (norm_x, norm_y) representing the normalized image coordinates (0 to 1, 0=left/top)
+    """
+    import math
+    from geographiclib.geodesic import Geodesic
+
+    fov_h, fov_v = fov
+
+    # Compute the ground half-extents based on the FOV.
+    half_ground_width  = h * math.tan(math.radians(fov_h / 2))
+    half_ground_height = h * math.tan(math.radians(fov_v / 2))
+
+    # Use geographiclib to compute the distance and bearing from the camera position to the GPS coordinate.
+    geod = Geodesic.WGS84
+    inv = geod.Inverse(cam_pos["lat"], cam_pos["lon"], gps.lat, gps.lon)
+    dist = inv["s12"]
+    az = inv["azi1"]
+    az_rad = math.radians(az)
+    
+    # Compute the east and north offsets from the camera's ground position.
+    east_offset  = dist * math.sin(az_rad)
+    north_offset = dist * math.cos(az_rad)
+    
+    # Rotate the offsets back by the heading to obtain image frame offsets.
+    heading_rad = math.radians(heading)
+    u = east_offset * math.cos(heading_rad) - north_offset * math.sin(heading_rad)
+    v = east_offset * math.sin(heading_rad) + north_offset * math.cos(heading_rad)
+
+    # Remove calibration offsets.
+    u_corr = u - offset_u
+    v_corr = v - offset_v
+
+    # Reverse the scaling from meters to normalized coordinates.
+    norm_x = u_corr / (2 * half_ground_width) + 0.5
+    norm_y = 0.5 - v_corr / (2 * half_ground_height)
+
+    return norm_x, norm_y
