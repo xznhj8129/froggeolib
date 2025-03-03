@@ -1,12 +1,14 @@
 from __future__ import annotations
 # froggeolib
 from geographiclib.geodesic import Geodesic
+from dataclasses import dataclass, asdict
 import mgrs
 import math
 import geojson
 import json
+import struct
 
-# monkey patch since this is fucking retarded
+# monkey patch since this is fucked
 _original_default = json.JSONEncoder().default
 
 def _patched_default(self, obj):
@@ -16,80 +18,63 @@ def _patched_default(self, obj):
 
 json.JSONEncoder.default = _patched_default
 
-class PosObject():
+class PosObject(): #unused for now
     def __init__(self, lat:float, lon:float, alt):
         self.lat = lat
         self.lon = lon
         self.alt = float(alt)
 
 
-class GPSposition():
-    def __init__(self, lat:float, lon:float, alt:float, ce:float = 0.0, le:float = 0.0, json:dict={}, tup:tuple=()):
-        if lat and lon:
-            self.lat = lat
-            self.lon = lon
-            if alt:
-                self.alt = float(alt)
-            else:
-                self.alt = 0.0
-            self.ce = ce
-            self.le = le
-                
-        elif json:
-            self.lat = float(json["lat"])
-            self.lon = float(json["lon"])
-            self.alt = float(json["alt"])
-            if "ce" in json:
-                self.ce = ce
-            if "le" in json:
-                self.le = le
-        elif tup:
-            self.lat = float(tup[0])
-            self.lon = float(tup[1])
-            if len(tup)==3:
-                self.alt = float(tup[3])
-            if len(tup)==5:
-                self.ce = float(tup[4])
-                self.le = float(tup[5])
-        else:
-            self.lat = 0.0
-            self.lon = 0.0
-            self.alt = 0.0
-            self.ce = 0.0
-            self.le = 0.0
+@dataclass
+class GPSposition:
+    """A class representing a GPS position with latitude, longitude, altitude, and optional errors."""
+    lat: float = 0.0
+    lon: float = 0.0
+    alt: float = 0.0
+    ce: float = 0.0  # Circular error
+    le: float = 0.0  # Linear error
+
+    @classmethod
+    def from_json(cls, json_dict: dict):
+        """Create a GPSposition instance from a JSON dictionary."""
+        return cls(
+            lat=float(json_dict.get("lat", 0.0)),
+            lon=float(json_dict.get("lon", 0.0)),
+            alt=float(json_dict.get("alt", 0.0)),
+            ce=float(json_dict.get("ce", 0.0)),
+            le=float(json_dict.get("le", 0.0))
+        )
+
+    @classmethod
+    def from_tuple(cls, tup: tuple):
+        """Create a GPSposition instance from a tuple."""
+        if len(tup) < 2:
+            raise ValueError("Tuple must have at least two elements (lat, lon)")
+        lat, lon = map(float, tup[:2])
+        alt = float(tup[2]) if len(tup) > 2 else 0.0
+        ce = float(tup[3]) if len(tup) > 3 else 0.0
+        le = float(tup[4]) if len(tup) > 4 else 0.0
+        return cls(lat, lon, alt, ce, le)
 
     def __str__(self):
-        if self.ce>0:
-            s = "Lattitude: {:.8f} Longitude: {:.8f} Altitude: {:.3f} CE: {:.1f} LE: {:.1f}".format(self.lat, self.lon, self.alt, self.ce, self.le)
-        else:
-            s = "Lattitude: {:.8f} Longitude: {:.8f} Altitude: {:.3f}".format(self.lat, self.lon, self.alt)
-        return s
-
-    def __json__(self):
-        return self.json()
-    def __dict__(self):
-        return self.json()
+        """Return a string representation of the GPS position."""
+        base = f"Latitude: {self.lat:.8f} Longitude: {self.lon:.8f} Altitude: {self.alt:.3f}"
+        if self.ce != 0 or self.le != 0:  # Include errors if either is non-zero
+            return f"{base} CE: {self.ce:.1f} LE: {self.le:.1f}"
+        return base
 
     def latlon(self):
+        """Return latitude and longitude as a tuple."""
         return (self.lat, self.lon)
 
     def mgrs(self):
+        """Convert the position to MGRS format using the mgrs library."""
         milobj = mgrs.MGRS()
-        return milobj.toMGRS(self.lat,self.lon)
+        return milobj.toMGRS(self.lat, self.lon)
 
     def json(self):
-        return {
-            "lat": self.lat,
-            "lon": self.lon,
-            "alt": self.alt,
-            "ce": self.ce,
-            "le": self.le
-        }
-
-    #def __setstate__(self, state):
-        # Called when the object is being deserialized
-    #    self.__dict__.update(state)
-    #    self.non_serializable_attribute = None 
+        """Return a dictionary representation for JSON serialization."""
+        return asdict(self)
 
 class PosVector():
     def __init__(self, distance, azimuth, elevation):
@@ -122,17 +107,86 @@ class InavWaypoint():
         msp_wp = struct.pack('<BBiiihhhB', self.wp_no, self.action, int(self.pos.lat * 1e7), int(self.pos.lon * 1e7), altitude*100, p1, p2, p3, flag)
         return msp_wp
 
-def convert_geopaste(string):
+def convert_geopaste(string): # from gnome-maps
     x = string.split(';')[0].split(':')[1].split(',')
     return GPSposition(float(x[0]),float(x[1]),float(0))
 
-def latlon_to_mgrs(latlon,alt=0):
-    milobj = mgrs.MGRS()
-    return milobj.toMGRS(latlon.lat,latlon.lon, alt)
+from froggeolib import mgrs
 
-def mgrs_to_latlon(milgrid):
-    milobj = mgrs.MGRS()
-    return milobj.toLatLon(milgrid)
+def latlon_to_mgrs(lat: float, lon: float, *, degrees: bool = True, precision: int = 5) -> str:
+    """
+    Convert latitude and longitude to an MGRS string.
+
+    Parameters:
+        lat (float): Latitude in decimal degrees (if degrees=True) or radians (if degrees=False).
+        lon (float): Longitude in decimal degrees (if degrees=True) or radians (if degrees=False).
+        degrees (bool): Indicates if the provided lat/lon are in decimal degrees.
+                        If False, they are assumed to be in radians. Default is True.
+        precision (int): The MGRS precision level (number of digit pairs for easting/northing).
+                         Typical values:
+                           - 1 for 10 km grid squares,
+                           - 2 for 1 km,
+                           - 3 for 100 m,
+                           - 4 for 10 m,
+                           - 5 for 1 m.
+                         Default is 5 (1 m precision).
+
+    Returns:
+        str: The MGRS string representation.
+    """
+    mgrs_obj = mgrs.MGRS()
+    return mgrs_obj.toMGRS(lat, lon, inDegrees=degrees, MGRSPrecision=precision)
+
+
+def mgrs_to_latlon(mgrs_str: str, *, degrees: bool = True) -> tuple:
+    """
+    Convert an MGRS string to latitude and longitude.
+
+    Parameters:
+        mgrs_str (str): The MGRS coordinate string.
+        degrees (bool): If True, returns lat/lon in decimal degrees; if False, returns in radians.
+                        Default is True.
+
+    Returns:
+        tuple: (latitude, longitude) in the specified units.
+    """
+    mgrs_obj = mgrs.MGRS()
+    return mgrs_obj.toLatLon(mgrs_str, inDegrees=degrees)
+
+
+def mgrs_to_utm(mgrs_str: str, *, encoding: str = "utf-8") -> tuple:
+    """
+    Convert an MGRS string to UTM coordinates.
+
+    Parameters:
+        mgrs_str (str): The MGRS coordinate string.
+        encoding (str): The character encoding for the input string. Default is "utf-8".
+
+    Returns:
+        tuple: (zone, hemisphere, easting, northing)
+    """
+    mgrs_obj = mgrs.MGRS()
+    return mgrs_obj.MGRSToUTM(mgrs_str, encoding=encoding)
+
+
+def utm_to_mgrs(zone: int, hemisphere: str, easting: float, northing: float, *, precision: int = 5) -> str:
+    """
+    Convert UTM coordinates to an MGRS string.
+
+    Parameters:
+        zone (int): The UTM zone number (typically 1 through 60).
+        hemisphere (str): 'N' for Northern Hemisphere or 'S' for Southern Hemisphere.
+        easting (float): The UTM easting value.
+        northing (float): The UTM northing value.
+        precision (int): The MGRS precision level (see latlon_to_mgrs for details).
+                         Default is 5 (1 m precision).
+
+    Returns:
+        str: The MGRS coordinate string.
+    """
+    mgrs_obj = mgrs.MGRS()
+    return mgrs_obj.UTMToMGRS(zone, hemisphere, easting, northing, MGRSPrecision=precision)
+
 
 def gps_to_vector(latlon1, latlon2):
     geod = Geodesic.WGS84
@@ -329,3 +383,328 @@ def gps_to_image_point(cam_pos, gps, h, fov, heading, offset_u=0, offset_v=0):
     norm_y = 0.5 - v_corr / (2 * half_ground_height)
 
     return norm_x, norm_y
+
+
+def get_easting_letters(zone: int) -> str:
+    """
+    Return the valid easting letters for a given UTM zone in MGRS.
+    The sequence cycles every 3 zones:
+      - If zone % 3 == 1: use "ABCDEFGH"
+      - If zone % 3 == 2: use "JKLMNPQR"
+      - If zone % 3 == 0: use "STUVWXYZ"
+    """
+    mod = zone % 3
+    if mod == 1:
+        return "ABCDEFGH"
+    elif mod == 2:
+        return "JKLMNPQR"
+    else:  # mod == 0
+        return "STUVWXYZ"
+
+# Northing letters are fixed for all zones.
+NORTHING_LETTERS = "ABCDEFGHJKLMNPQRSTUV"  # 20 letters (I and O are omitted)
+
+def parse_mgrs(mgrs_str: str, precision: int = None):
+    """
+    Parse an MGRS string into its components:
+      - zone (int)
+      - grid (2-letter string)
+      - easting offset (int)
+      - northing offset (int)
+      - actual precision (number of digits per offset)
+
+    The input MGRS string is assumed to be in the form:
+         <zone><lat_band><grid><easting><northing>
+    For example, "33RWH8359618530" means:
+         Zone = 33, Band = R (ignored), Grid = WH, 
+         Easting = 83596, Northing = 18530
+
+    If precision is not provided or doesn’t match the numeric part,
+    the numeric precision is auto-detected from the string.
+    """
+    mgrs_str = mgrs_str.strip().upper()
+    # Extract the zone (one or two digits)
+    i = 0
+    while i < len(mgrs_str) and mgrs_str[i].isdigit():
+        i += 1
+    if i == 0:
+        raise ValueError("Invalid MGRS string: no zone digits found")
+    zone = int(mgrs_str[:i])
+    
+    # Next character: latitude band (ignored in the binary encoding)
+    if i >= len(mgrs_str):
+        raise ValueError("Invalid MGRS string: missing latitude band")
+    band = mgrs_str[i]
+    i += 1
+
+    # Next two characters: the 100 km grid designator.
+    if i + 1 >= len(mgrs_str):
+        raise ValueError("Invalid MGRS string: missing 100km grid letters")
+    grid = mgrs_str[i:i+2]
+    i += 2
+
+    # The remaining digits represent the easting and northing offsets.
+    numeric_len = len(mgrs_str) - i
+    if numeric_len % 2 != 0:
+        raise ValueError("Numeric part length is not even.")
+    detected_precision = numeric_len // 2
+    if precision is None or precision != detected_precision:
+        precision = detected_precision
+
+    numeric = mgrs_str[i:]
+    easting_str = numeric[:precision]
+    northing_str = numeric[precision:]
+    easting = int(easting_str)
+    northing = int(northing_str)
+    
+    return zone, grid, easting, northing, precision
+
+def encode_mgrs_binary(mgrs_str: str, precision: int = None) -> bytes:
+    """
+    Encode a full MGRS string into a compact binary format.
+    
+    Layout:
+      • 1 byte for the UTM zone
+      • 1 byte for the 100km grid designator (both letters encoded into one byte)
+      • <bits_needed> bits for the easting offset
+      • <bits_needed> bits for the northing offset
+      
+    bits_needed = ceil(log2(10^precision))
+    
+    The latitude band is not stored; a placeholder is used on decode.
+    """
+    zone, grid, easting, northing, actual_precision = parse_mgrs(mgrs_str, precision)
+    
+    # Determine grid letters based on zone.
+    valid_easting_letters = get_easting_letters(zone)
+    easting_letter = grid[0]
+    northing_letter = grid[1]
+    if easting_letter not in valid_easting_letters:
+        raise ValueError(f"Invalid easting grid letter: {easting_letter} for zone {zone}, expected one of {valid_easting_letters}")
+    try:
+        easting_idx = valid_easting_letters.index(easting_letter)
+    except ValueError:
+        raise ValueError(f"Invalid easting grid letter: {easting_letter}")
+    try:
+        northing_idx = NORTHING_LETTERS.index(northing_letter)
+    except ValueError:
+        raise ValueError(f"Invalid northing grid letter: {northing_letter}")
+    grid_index = easting_idx * len(NORTHING_LETTERS) + northing_idx
+
+    max_value = 10 ** actual_precision
+    bits_needed = math.ceil(math.log2(max_value))
+    
+    total_bits = 16 + 2 * bits_needed  # 8 bits for zone, 8 for grid_index
+    total_bytes = (total_bits + 7) // 8
+    
+    combined = (zone & 0xFF) << (8 + 2 * bits_needed)
+    combined |= (grid_index & 0xFF) << (2 * bits_needed)
+    combined |= (easting & ((1 << bits_needed) - 1)) << bits_needed
+    combined |= (northing & ((1 << bits_needed) - 1))
+    
+    return combined.to_bytes(total_bytes, byteorder='big')
+
+def decode_mgrs_binary(data: bytes, precision: int) -> str:
+    """
+    Decode a full binary MGRS representation back into an MGRS string.
+    
+    Returned string is of the form:
+         <zone><band_placeholder><grid><easting><northing>
+    (The latitude band is not stored; "X" is used as a placeholder.)
+    """
+    bits_needed = math.ceil(math.log2(10 ** precision))
+    total_bits = 16 + 2 * bits_needed
+    total_bytes = (total_bits + 7) // 8
+    if len(data) != total_bytes:
+        raise ValueError("Invalid data length for the specified precision")
+    
+    combined = int.from_bytes(data, byteorder='big')
+    
+    northing_mask = (1 << bits_needed) - 1
+    northing = combined & northing_mask
+    combined //= (1 << bits_needed)
+    easting = combined & northing_mask
+    combined //= (1 << bits_needed)
+    grid_index = combined & 0xFF
+    combined //= (1 << 8)
+    zone = combined & 0xFF
+    
+    valid_easting_letters = get_easting_letters(zone)
+    num_northing_letters = len(NORTHING_LETTERS)
+    easting_idx = grid_index // num_northing_letters
+    northing_idx = grid_index % num_northing_letters
+    try:
+        easting_letter = valid_easting_letters[easting_idx]
+    except IndexError:
+        raise ValueError("Decoded easting letter index out of range")
+    try:
+        northing_letter = NORTHING_LETTERS[northing_idx]
+    except IndexError:
+        raise ValueError("Decoded northing letter index out of range")
+    grid = easting_letter + northing_letter
+    easting_str = str(easting).zfill(precision)
+    northing_str = str(northing).zfill(precision)
+    mgrs_str = f"{zone}X{grid}{easting_str}{northing_str}"
+    return mgrs_str
+
+def encode_relative_mgrs_binary(mgrs_str: str, precision: int = None, omit_zone: bool = False, omit_grid: bool = False) -> bytes:
+    """
+    Encode an MGRS string into a compact binary format while optionally omitting
+    the GZD (zone) and/or the 100 km grid designator.
+
+    Layout order:
+      • [Zone] (8 bits)  -- if not omitted
+      • [Grid index] (8 bits) -- if not omitted
+      • [Easting offset] (<bits_needed> bits)
+      • [Northing offset] (<bits_needed> bits)
+    
+    Parameters:
+      mgrs_str: Full MGRS string.
+      precision: Optionally force a specific precision; if None, auto-detected.
+      omit_zone: If True, the 1-byte zone is omitted.
+      omit_grid: If True, the 1-byte grid designator is omitted.
+    
+    Returns:
+      A byte string representing the compact encoding.
+    """
+    zone, grid, easting, northing, actual_precision = parse_mgrs(mgrs_str, precision)
+    
+    valid_easting_letters = get_easting_letters(zone)
+    easting_letter = grid[0]
+    northing_letter = grid[1]
+    if easting_letter not in valid_easting_letters:
+        raise ValueError(f"Invalid easting grid letter: {easting_letter} for zone {zone}, expected one of {valid_easting_letters}")
+    try:
+        easting_idx = valid_easting_letters.index(easting_letter)
+    except ValueError:
+        raise ValueError(f"Invalid easting grid letter: {easting_letter}")
+    try:
+        northing_idx = NORTHING_LETTERS.index(northing_letter)
+    except ValueError:
+        raise ValueError(f"Invalid northing grid letter: {northing_letter}")
+    grid_index = easting_idx * len(NORTHING_LETTERS) + northing_idx
+
+    max_value = 10 ** actual_precision
+    bits_needed = math.ceil(math.log2(max_value))
+    
+    total_bits = 2 * bits_needed
+    if not omit_grid:
+        total_bits += 8
+    if not omit_zone:
+        total_bits += 8
+    total_bytes = (total_bits + 7) // 8
+
+    combined = 0
+    if not omit_zone:
+        combined = (combined << 8) | (zone & 0xFF)
+    if not omit_grid:
+        combined = (combined << 8) | (grid_index & 0xFF)
+    combined = (combined << bits_needed) | (easting & ((1 << bits_needed) - 1))
+    combined = (combined << bits_needed) | (northing & ((1 << bits_needed) - 1))
+    
+    return combined.to_bytes(total_bytes, byteorder='big')
+
+def decode_relative_mgrs_binary(data: bytes, precision: int, default_zone: int = None, default_grid: str = None,
+                                omit_zone: bool = False, omit_grid: bool = False) -> str:
+    """
+    Decode the relative binary MGRS representation back into an MGRS string.
+    
+    If omit_zone is True, default_zone must be provided.
+    If omit_grid is True, default_grid (a 2-letter string) must be provided.
+    
+    Returns an MGRS string of the form:
+         <zone><band_placeholder><grid><easting><northing>
+    (Using "X" as a placeholder for the latitude band.)
+    """
+    bits_needed = math.ceil(math.log2(10 ** precision))
+    total_bits = 2 * bits_needed
+    if not omit_grid:
+        total_bits += 8
+    if not omit_zone:
+        total_bits += 8
+    total_bytes = (total_bits + 7) // 8
+    if len(data) != total_bytes:
+        raise ValueError("Invalid data length for the specified precision and omitted fields")
+    
+    combined = int.from_bytes(data, byteorder='big')
+    
+    northing_mask = (1 << bits_needed) - 1
+    northing = combined & northing_mask
+    combined //= (1 << bits_needed)
+    easting = combined & northing_mask
+    combined //= (1 << bits_needed)
+    
+    if not omit_grid:
+        grid_index = combined & 0xFF
+        combined //= (1 << 8)
+    else:
+        grid_index = None
+    if not omit_zone:
+        zone = combined & 0xFF
+    else:
+        if default_zone is None:
+            raise ValueError("Zone omitted but no default_zone provided")
+        zone = default_zone
+
+    if not omit_grid:
+        valid_easting_letters = get_easting_letters(zone)
+        num_northing_letters = len(NORTHING_LETTERS)
+        easting_idx = grid_index // num_northing_letters
+        northing_idx = grid_index % num_northing_letters
+        try:
+            easting_letter = valid_easting_letters[easting_idx]
+        except IndexError:
+            raise ValueError("Decoded easting letter index out of range")
+        try:
+            northing_letter = NORTHING_LETTERS[northing_idx]
+        except IndexError:
+            raise ValueError("Decoded northing letter index out of range")
+        grid = easting_letter + northing_letter
+    else:
+        if default_grid is None or len(default_grid) != 2:
+            raise ValueError("Grid omitted but no valid default_grid provided")
+        grid = default_grid
+
+    easting_str = str(easting).zfill(precision)
+    northing_str = str(northing).zfill(precision)
+    mgrs_str = f"{zone}X{grid}{easting_str}{northing_str}"
+    return mgrs_str
+
+
+# Usage Example
+if __name__ == "__main__":
+    a = GPSposition(lat=24.578524, lon=15.825613)
+
+    # For comparison, show the lat/lon binary encoding.
+    packed = struct.pack('<ii', int(a.lat * 1e7), int(a.lon * 1e7))
+    print('Lat/Lon:', a)
+    print('Lat/Lon binary (hex):', packed.hex(), "Length (bytes):", len(packed))
+    print("-" * 40)
+
+    mgrs_precision = 4
+    full_mgrs = latlon_to_mgrs(a.lat, a.lon, precision=mgrs_precision)
+    print("Full MGRS:", full_mgrs)
+    # Encode full MGRS.
+    binary_full = encode_mgrs_binary(full_mgrs)
+    decoded_full = decode_mgrs_binary(binary_full, mgrs_precision)
+    print("Full encoding -> binary (hex):", binary_full.hex(), "Length:", len(binary_full), "bytes")
+    print("Decoded full MGRS:", decoded_full)
+    print("-" * 40)
+    
+    # Now, encode relative MGRS omitting the GZD (zone) only.
+    binary_relative_zone = encode_relative_mgrs_binary(full_mgrs, precision=mgrs_precision, omit_zone=True, omit_grid=False)
+    # Extract default zone using parse_mgrs instead of split.
+    zone_only, _, _, _, _ = parse_mgrs(full_mgrs)
+    decoded_relative_zone = decode_relative_mgrs_binary(binary_relative_zone, mgrs_precision, default_zone=zone_only, omit_zone=True, omit_grid=False)
+    print("Relative (omit zone) -> binary (hex):", binary_relative_zone.hex(), "Length:", len(binary_relative_zone), "bytes")
+    print("Decoded relative (zone omitted):", decoded_relative_zone)
+    print("-" * 40)
+    
+    # Finally, encode relative MGRS omitting both the GZD and the grid.
+    binary_relative_both = encode_relative_mgrs_binary(full_mgrs, precision=mgrs_precision, omit_zone=True, omit_grid=True)
+    # Extract default grid from the full MGRS using parse_mgrs.
+    _, full_grid, _, _, _ = parse_mgrs(full_mgrs)
+    decoded_relative_both = decode_relative_mgrs_binary(binary_relative_both, mgrs_precision, default_zone=zone_only, default_grid=full_grid, omit_zone=True, omit_grid=True)
+    print("Relative (omit zone & grid) -> binary (hex):", binary_relative_both.hex(), "Length:", len(binary_relative_both), "bytes")
+    print("Decoded relative (zone & grid omitted):", decoded_relative_both)
+    print("-" * 40)
