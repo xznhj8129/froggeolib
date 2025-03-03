@@ -76,6 +76,7 @@ class GPSposition:
         """Return a dictionary representation for JSON serialization."""
         return asdict(self)
 
+
 class PosVector():
     def __init__(self, distance, azimuth, elevation):
         self.dist = distance
@@ -91,8 +92,142 @@ class PosVector():
             "elev": self.elev
         })
 
-class InavWaypoint():
-    def __init__(self, wp_no:int, action:int, lat:float, lon:float, alt:int, p1:int, p2:int, p3:int, flag:int):
+
+def gps_to_vector(latlon1, latlon2):
+    geod = Geodesic.WGS84
+    g = geod.Inverse(latlon1.lat, latlon1.lon, latlon2.lat, latlon2.lon)
+    az = g['azi1']
+    dist = g['s12']
+    if az<0:
+        az = az+360
+    if latlon1.alt > latlon2.alt:
+        relalt = latlon1.alt - latlon2.alt
+        elev = math.degrees( math.atan( relalt / dist ) ) * -1
+    else:
+        relalt = latlon2.alt - latlon1.alt
+        elev = math.degrees( math.atan( relalt / dist ) ) 
+
+    return PosVector(dist, az, elev) #dist, azimuth, elev
+
+
+def vector_to_gps(latlon, dist=None, az=None, pos_vector=None):
+    if pos_vector is not None and (dist is not None or az is not None):
+        raise ValueError("Cannot provide both pos_vector and individual dist/az")
+    elif pos_vector is not None:
+        dist = pos_vector.dist
+        az = pos_vector.az
+    elif dist is not None and az is not None:
+        # Use the individual dist and az as provided
+        pass
+    else:
+        raise ValueError("Must provide either pos_vector or both dist and az")
+    
+    geod = Geodesic.WGS84
+    g = geod.Direct(latlon.lat, latlon.lon, az, dist)
+    return GPSposition(float(g['lat2']), float(g['lon2']), float(0))
+
+# works only if both objects are roughly above same ground level
+def vector_to_gps_air(latlon, az=None, ang=None, pos_vector=None):
+    if pos_vector is not None and (az is not None or ang is not None):
+        raise ValueError("Cannot provide both pos_vector and individual az/ang")
+    elif pos_vector is not None:
+        az = pos_vector.az
+        ang = 90 - pos_vector.elev  # Convert elevation (horizontal) to zenith angle
+    elif az is not None and ang is not None:
+        # Use the individual az and ang as provided
+        pass
+    else:
+        raise ValueError("Must provide either pos_vector or both az and ang")
+    
+    geod = Geodesic.WGS84
+    truerange = math.tan(math.radians(ang)) * latlon.alt
+    g = geod.Direct(latlon.lat, latlon.lon, az, truerange)
+    return GPSposition(float(g['lat2']), float(g['lon2']), float(0))
+
+# works only if both objects are roughly above same ground level
+def vector_rangefinder_to_gps_air(latlon, az=None, ang=None, slantrange=None, pos_vector=None):
+    if pos_vector is not None and (az is not None or ang is not None or slantrange is not None):
+        raise ValueError("Cannot provide both pos_vector and individual az/ang/slantrange")
+    elif pos_vector is not None:
+        az = pos_vector.az
+        ang = pos_vector.elev  # Elevation angle from horizontal
+        slantrange = pos_vector.dist
+    elif az is not None and ang is not None and slantrange is not None:
+        # Use the individual az, ang, and slantrange as provided
+        pass
+    else:
+        raise ValueError("Must provide either pos_vector or az, ang, and slantrange")
+    
+    geod = Geodesic.WGS84
+    truerange = math.cos(math.radians(ang)) * slantrange
+    g = geod.Direct(latlon.lat, latlon.lon, az, truerange)
+    return GPSposition(float(g['lat2']), float(g['lon2']), float(0))
+
+
+def distance_m(p1: GPSposition, p2: GPSposition) -> float:
+    geod = Geodesic.WGS84
+    inv = geod.Inverse(p1.lat, p1.lon, p2.lat, p2.lon)
+    return inv["s12"]
+
+
+def to_local_xy(origin: GPSposition, point: GPSposition):
+    """
+    Projects 'point' into a local tangent plane with 'origin' as (0, 0).
+    x-axis points East, y-axis points North (approx).
+    """
+    geod = Geodesic.WGS84
+    inv = geod.Inverse(origin.lat, origin.lon, point.lat, point.lon)
+    dist = inv["s12"]
+    az   = inv["azi1"]  # azimuth from origin to point, relative to north
+    azr  = math.radians(az)
+    x = dist * math.sin(azr)  # East
+    y = dist * math.cos(azr)  # North
+    return x, y
+
+def point_in_polygon(point: GPSposition, polygon: list[GPSposition]) -> bool:
+    """
+    Ray casting in a local 2D plane around the first polygon vertex.
+    """
+    # Project all polygon vertices + the point to local XY
+    origin = polygon[0]
+    poly_xy = [to_local_xy(origin, v) for v in polygon]
+    px, py  = to_local_xy(origin, point)
+
+    # Standard ray-casting count
+    inside = False
+    for i in range(len(poly_xy)):
+        x1, y1 = poly_xy[i]
+        x2, y2 = poly_xy[(i + 1) % len(poly_xy)]
+        cond = ((y1 > py) != (y2 > py)) and (
+            px < (x2 - x1) * (py - y1) / (y2 - y1) + x1
+        )
+        if cond:
+            inside = not inside
+    return inside
+
+def point_in_shape(pos: GPSposition, shape_def: dict) -> bool:
+    """
+    shape_def examples:
+      {"shape": "circle",  "points": [center],             "size": 100}
+      {"shape": "polygon", "points": [p1,p2,..., pN],      "size": None}
+    """
+    shape_type = shape_def["shape"]
+    points     = shape_def["points"]
+    size       = shape_def["size"]
+
+    if shape_type == "circle":
+        center = points[0]
+        radius_m = size
+        return distance_m(center, pos) <= radius_m
+
+    elif shape_type == "polygon":
+        return point_in_polygon(pos, points)
+
+    else:
+        raise ValueError(f"Unsupported shape type: {shape_type}")
+
+class InavWaypoint:
+    def __init__(self, wp_no: int, action: int, lat: float, lon: float, alt: float, p1: int, p2: int, p3: int, flag: int):
         self.pos = GPSposition(lat, lon, alt)
         self.wp_no = int(wp_no)
         self.action = int(action)
@@ -100,12 +235,147 @@ class InavWaypoint():
         self.p2 = int(p2)
         self.p3 = int(p3)
         self.flag = int(flag)
+
     def __str__(self):
         s = f"WP No.: {self.wp_no} {self.pos} Action: {self.action} P1: {self.p1} P2: {self.p2} P3: {self.p3} Flag: {self.flag}"
         return s
+
     def packed(self):
-        msp_wp = struct.pack('<BBiiihhhB', self.wp_no, self.action, int(self.pos.lat * 1e7), int(self.pos.lon * 1e7), altitude*100, p1, p2, p3, flag)
+        msp_wp = struct.pack('<BBiiihhhB', self.wp_no, self.action, int(self.pos.lat * 1e7), int(self.pos.lon * 1e7), int(self.pos.alt * 100), self.p1, self.p2, self.p3, self.flag)
         return msp_wp
+
+    @classmethod
+    def unpack(cls, data):
+        if len(data) != 21:
+            raise ValueError("Invalid data length for InavWaypoint unpacking")
+        wp_no, action, lat_int, lon_int, alt_int, p1, p2, p3, flag = struct.unpack('<BBiiihhhB', data)
+        lat = lat_int / 1e7
+        lon = lon_int / 1e7
+        alt = alt_int / 100.0
+        return cls(wp_no, action, lat, lon, alt, p1, p2, p3, flag)
+
+def mavlink_crc16(data):
+    """Calculate MAVLink CRC-16 checksum."""
+    crc = 0xFFFF
+    for byte in data:
+        tmp = byte ^ (crc & 0xFF)
+        tmp = (tmp ^ (tmp << 4)) & 0xFF
+        crc = (crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)
+    return crc & 0xFFFF
+
+class MavlinkMissionItem:
+    """A standalone class to represent a MAVLink MISSION_ITEM_INT message."""
+    def __init__(self, seq, command, lat=None, lon=None, alt=None, param1=0.0, param2=0.0, param3=0.0, param4=0.0,
+                 frame=3, current=0, autocontinue=1, mission_type=0, target_system=1, target_component=1, sequence_number=0):
+        """
+        Initialize a MAVLink mission item.
+
+        Args:
+            seq (int): Sequence number of the mission item.
+            command (int): MAV_CMD command ID (e.g., 16 for MAV_CMD_NAV_WAYPOINT).
+            lat (float, optional): Latitude in degrees. Converted to x (×10⁷) if provided.
+            lon (float, optional): Longitude in degrees. Converted to y (×10⁷) if provided.
+            alt (float, optional): Altitude in meters. Assigned to z if provided.
+            param1 (float): Parameter 1 (e.g., hold time).
+            param2 (float): Parameter 2 (e.g., acceptance radius).
+            param3 (float): Parameter 3 (e.g., pass-through radius).
+            param4 (float): Parameter 4 (e.g., desired yaw).
+            frame (int): Coordinate frame (default: 3 = MAV_FRAME_GLOBAL_RELATIVE_ALT).
+            current (int): 1 if this is the current item, 0 otherwise (default: 0).
+            autocontinue (int): 1 to proceed to next item, 0 to stop (default: 1).
+            mission_type (int): Mission type (default: 0 = MAV_MISSION_TYPE_MISSION).
+            target_system (int): Target system ID (default: 1).
+            target_component (int): Target component ID (default: 1).
+            sequence_number (int): Packet sequence number (default: 0).
+        """
+        self.seq = int(seq)
+        self.command = int(command)
+        if lat is not None and lon is not None and alt is not None:
+            self.x = int(lat * 1e7)  # Latitude scaled by 10⁷
+            self.y = int(lon * 1e7)  # Longitude scaled by 10⁷
+            self.z = float(alt)      # Altitude in meters
+            self.pos = GPSposition(lat, lon, alt)
+        else:
+            self.x = 0
+            self.y = 0
+            self.z = 0.0
+            self.pos = None
+        self.param1 = float(param1)
+        self.param2 = float(param2)
+        self.param3 = float(param3)
+        self.param4 = float(param4)
+        self.frame = int(frame)
+        self.current = int(current)
+        self.autocontinue = int(autocontinue)
+        self.mission_type = int(mission_type)
+        self.target_system = int(target_system)
+        self.target_component = int(target_component)
+        self.sequence_number = int(sequence_number % 256)  # 0-255
+        self.MAVLINK_V2_MAGIC = 0xFD
+        self.MAVLINK_MSG_ID_MISSION_ITEM_INT = 74  # 0x4A
+        self.MISSION_ITEM_INT_CRC_EXTRA = 78  # CRC extra byte for MISSION_ITEM_INT
+
+
+    def __str__(self):
+        """Return a human-readable string representation of the mission item."""
+        if self.command == 16 and self.frame in {0, 3, 6}:  # MAV_CMD_NAV_WAYPOINT and global frames
+            coords = f"Coordinates (Lat: {self.x / 1e7:.8f}, Lon: {self.y / 1e7:.8f}, Alt: {self.z:.3f})"
+        else:
+            coords = f"X: {self.x}, Y: {self.y}, Z: {self.z}"
+        return (f"Sequence {self.seq}, Command {self.command}, {coords}, "
+                f"P1: {self.param1}, P2: {self.param2}, P3: {self.param3}, P4: {self.param4}, "
+                f"Autocontinue: {self.autocontinue}")
+
+    def packed(self):
+        """Serialize the mission item into MAVLink v2 MISSION_ITEM_INT binary format."""
+        # Payload format: <BBHBHBBffffiifB (28 bytes)
+        payload = struct.pack(
+            '<BBHBHBBffffiifB',
+            self.target_system,    # B (uint8_t)
+            self.target_component, # B (uint8_t)
+            self.seq,              # H (uint16_t)
+            self.frame,            # B (uint8_t)
+            self.command,          # H (uint16_t)
+            self.current,          # B (uint8_t)
+            self.autocontinue,     # B (uint8_t)
+            self.param1,           # f (float)
+            self.param2,           # f (float)
+            self.param3,           # f (float)
+            self.param4,           # f (float)
+            self.x,                # i (int32_t)
+            self.y,                # i (int32_t)
+            self.z,                # f (float)
+            self.mission_type      # B (uint8_t)
+        )
+
+        # Header
+        payload_len = len(payload)  # 28 bytes
+        msg_id = self.MAVLINK_MSG_ID_MISSION_ITEM_INT
+        header = struct.pack(
+            '<BBBBBBBBBB',         # 10 bytes, 10 items
+            self.MAVLINK_V2_MAGIC,      # Magic byte (1 byte)
+            payload_len,          # Payload length (1 byte)
+            0x00,                 # Incompatibility flags (1 byte)
+            0x00,                 # Compatibility flags (1 byte)
+            self.sequence_number, # Sequence number (1 byte)
+            self.target_system,   # System ID (1 byte)
+            self.target_component,# Component ID (1 byte)
+            msg_id & 0xFF,        # Message ID byte 0 (1 byte)
+            (msg_id >> 8) & 0xFF, # Message ID byte 1 (1 byte)
+            (msg_id >> 16) & 0xFF # Message ID byte 2 (1 byte)
+        )
+
+        # Calculate CRC
+        crc_input = payload + bytes([self.MISSION_ITEM_INT_CRC_EXTRA])
+        crc = mavlink_crc16(crc_input)
+        crc_bytes = struct.pack('<H', crc)
+
+        # Full message
+        return header + payload + crc_bytes
+
+    @classmethod
+    def unpack(cls, data, sequence_number=0):
+        pass #a bit of a PITA
 
 def convert_geopaste(string): # from gnome-maps
     x = string.split(';')[0].split(':')[1].split(',')
@@ -188,99 +458,6 @@ def utm_to_mgrs(zone: int, hemisphere: str, easting: float, northing: float, *, 
     return mgrs_obj.UTMToMGRS(zone, hemisphere, easting, northing, MGRSPrecision=precision)
 
 
-def gps_to_vector(latlon1, latlon2):
-    geod = Geodesic.WGS84
-    g = geod.Inverse(latlon1.lat, latlon1.lon, latlon2.lat, latlon2.lon)
-    az = g['azi1']
-    dist = g['s12']
-    if az<0:
-        az = az+360
-    if latlon1.alt > latlon2.alt:
-        relalt = latlon1.alt - latlon2.alt
-        elev = math.degrees( math.atan( relalt / dist ) ) * -1
-    else:
-        relalt = latlon2.alt - latlon1.alt
-        elev = math.degrees( math.atan( relalt / dist ) ) 
-
-    return PosVector(dist, az, elev) #dist, azimuth, elev
-
-def vector_to_gps(latlon, dist, az):
-    geod = Geodesic.WGS84
-    g = geod.Direct(latlon.lat, latlon.lon, az, dist)
-    return GPSposition(float(g['lat2']),float(g['lon2']),float(0))
-
-def vector_to_gps_air(latlon, az, ang): #only valid if both points are at same ground level
-    geod = Geodesic.WGS84
-    truerange = math.tan(math.radians(ang)) * latlon.alt
-    slantrange = latlon.alt / math.cos(math.radians(ang))
-    g = geod.Direct(latlon.lat, latlon.lon, az, truerange)
-    return GPSposition(float(g['lat2']),float(g['lon2']),float(0))
-
-def vector_rangefinder_to_gps_air(latlon, az, ang, slantrange):
-    geod = Geodesic.WGS84
-    truerange = math.cos(math.radians(ang))*slantrange
-    g = geod.Direct(latlon.lat, latlon.lon, az, truerange)
-    return GPSposition(float(g['lat2']),float(g['lon2']),float(0))
-
-
-def distance_m(p1: GPSposition, p2: GPSposition) -> float:
-    inv = geod.Inverse(p1.lat, p1.lon, p2.lat, p2.lon)
-    return inv["s12"]
-
-def to_local_xy(origin: GPSposition, point: GPSposition):
-    """
-    Projects 'point' into a local tangent plane with 'origin' as (0, 0).
-    x-axis points East, y-axis points North (approx).
-    """
-    inv = geod.Inverse(origin.lat, origin.lon, point.lat, point.lon)
-    dist = inv["s12"]
-    az   = inv["azi1"]  # azimuth from origin to point, relative to north
-    azr  = math.radians(az)
-    x = dist * math.sin(azr)  # East
-    y = dist * math.cos(azr)  # North
-    return x, y
-
-def point_in_polygon(point: GPSposition, polygon: list[GPSposition]) -> bool:
-    """
-    Ray casting in a local 2D plane around the first polygon vertex.
-    """
-    # Project all polygon vertices + the point to local XY
-    origin = polygon[0]
-    poly_xy = [to_local_xy(origin, v) for v in polygon]
-    px, py  = to_local_xy(origin, point)
-
-    # Standard ray-casting count
-    inside = False
-    for i in range(len(poly_xy)):
-        x1, y1 = poly_xy[i]
-        x2, y2 = poly_xy[(i + 1) % len(poly_xy)]
-        cond = ((y1 > py) != (y2 > py)) and (
-            px < (x2 - x1) * (py - y1) / (y2 - y1) + x1
-        )
-        if cond:
-            inside = not inside
-    return inside
-
-def point_in_shape(pos: GPSposition, shape_def: dict) -> bool:
-    """
-    shape_def examples:
-      {"shape": "circle",  "points": [center],             "size": 100}
-      {"shape": "polygon", "points": [p1,p2,..., pN],      "size": None}
-    """
-    shape_type = shape_def["shape"]
-    points     = shape_def["points"]
-    size       = shape_def["size"]
-
-    if shape_type == "circle":
-        center = points[0]
-        radius_m = size
-        return distance_m(center, pos) <= radius_m
-
-    elif shape_type == "polygon":
-        return point_in_polygon(pos, points)
-
-    else:
-        raise ValueError(f"Unsupported shape type: {shape_type}")
 
 def image_point_to_gps(pos, h, fov, heading, norm_x, norm_y, offset_u=0, offset_v=0):
     """
@@ -673,8 +850,28 @@ def decode_relative_mgrs_binary(data: bytes, precision: int, default_zone: int =
 
 # Usage Example
 if __name__ == "__main__":
-    a = GPSposition(lat=24.578524, lon=15.825613)
+    a = GPSposition(lat=15.83345500, lon=20.89884100, alt=0)
+    a = convert_geopaste("geo:15.833455,20.898841;crs=wgs84;u=0")
+    print(a)
+    print(a.json())
+    vec = PosVector(1000.0, 42.1, 3.5)
+    print('PosVector:', vec)
 
+    pos2 = vector_to_gps(a, dist=1000.0, az=42.1)
+    pos2 = vector_to_gps(a, pos_vector=vec)
+    print('vector_to_gps:', pos2)
+
+    vec3 = vector_to_gps_air(a, az=42.1, ang=3.5)
+    vec3 = vector_to_gps_air(a, pos_vector=vec)
+    print('vector_to_gps_air:', vec3)
+
+    dist = distance_m(a, pos2)
+    print("Distance:",dist)
+    xy = to_local_xy(a, pos2)
+    print(f"X: {xy[0]}, Y: {xy[1]}")
+
+    print()
+    print("-" * 40)
     # For comparison, show the lat/lon binary encoding.
     packed = struct.pack('<ii', int(a.lat * 1e7), int(a.lon * 1e7))
     print('Lat/Lon:', a)
@@ -707,4 +904,30 @@ if __name__ == "__main__":
     decoded_relative_both = decode_relative_mgrs_binary(binary_relative_both, mgrs_precision, default_zone=zone_only, default_grid=full_grid, omit_zone=True, omit_grid=True)
     print("Relative (omit zone & grid) -> binary (hex):", binary_relative_both.hex(), "Length:", len(binary_relative_both), "bytes")
     print("Decoded relative (zone & grid omitted):", decoded_relative_both)
+
     print("-" * 40)
+    print("MSP WP")
+    wp = InavWaypoint(1, 0, a.lat, -a.lon, 100.0, 0, 0, 0, 0)
+    packed_data = wp.packed()
+    print(packed_data.hex())
+    print(f"Packed length: {len(packed_data)} bytes")  
+    unpacked_wp = InavWaypoint.unpack(packed_data)
+    print(unpacked_wp)
+
+    print()
+    print("-" * 40)
+    print("Mavlink WP")
+    wp = MavlinkMissionItem(
+        seq=1,
+        command=16,  # MAV_CMD_NAV_WAYPOINT
+        lat=a.lat,
+        lon=-a.lon,
+        alt=100.0,
+        param1=5.0,  # Hold time
+        param2=10.0, # Acceptance radius
+        sequence_number=1
+    )
+    packed_data = wp.packed()
+    print(packed_data.hex())
+    print(f"Packed length: {len(packed_data)} bytes") 
+    print(wp)
