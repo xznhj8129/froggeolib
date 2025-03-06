@@ -93,24 +93,24 @@ class PosVector():
         })
 
 
-def gps_to_vector(latlon1, latlon2):
+def gps_to_vector(pos1, pos2):
     geod = Geodesic.WGS84
-    g = geod.Inverse(latlon1.lat, latlon1.lon, latlon2.lat, latlon2.lon)
+    g = geod.Inverse(pos1.lat, pos1.lon, pos2.lat, pos2.lon)
     az = g['azi1']
     dist = g['s12']
     if az<0:
         az = az+360
-    if latlon1.alt > latlon2.alt:
-        relalt = latlon1.alt - latlon2.alt
+    if pos1.alt > pos2.alt:
+        relalt = pos1.alt - pos2.alt
         elev = math.degrees( math.atan( relalt / dist ) ) * -1
     else:
-        relalt = latlon2.alt - latlon1.alt
+        relalt = pos2.alt - pos1.alt
         elev = math.degrees( math.atan( relalt / dist ) ) 
 
     return PosVector(dist, az, elev) #dist, azimuth, elev
 
 
-def vector_to_gps(latlon, dist=None, az=None, pos_vector=None):
+def vector_to_gps(pos, dist=None, az=None, pos_vector=None):
     if pos_vector is not None and (dist is not None or az is not None):
         raise ValueError("Cannot provide both pos_vector and individual dist/az")
     elif pos_vector is not None:
@@ -123,7 +123,7 @@ def vector_to_gps(latlon, dist=None, az=None, pos_vector=None):
         raise ValueError("Must provide either pos_vector or both dist and az")
     
     geod = Geodesic.WGS84
-    g = geod.Direct(latlon.lat, latlon.lon, az, dist)
+    g = geod.Direct(pos.lat, pos.lon, az, dist)
     return GPSposition(float(g['lat2']), float(g['lon2']), float(0))
 
 # works only if both objects are roughly above same ground level
@@ -164,7 +164,7 @@ def vector_rangefinder_to_gps_air(latlon, az=None, ang=None, slantrange=None, po
     return GPSposition(float(g['lat2']), float(g['lon2']), float(0))
 
 
-def distance_m(p1: GPSposition, p2: GPSposition) -> float:
+def gps_distance_m(p1: GPSposition, p2: GPSposition) -> float:
     geod = Geodesic.WGS84
     inv = geod.Inverse(p1.lat, p1.lon, p2.lat, p2.lon)
     return inv["s12"]
