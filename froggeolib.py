@@ -865,7 +865,7 @@ if __name__ == "__main__":
     vec3 = vector_to_gps_air(a, pos_vector=vec)
     print('vector_to_gps_air:', vec3)
 
-    dist = distance_m(a, pos2)
+    dist = gps_distance_m(a, pos2)
     print("Distance:",dist)
     xy = to_local_xy(a, pos2)
     print(f"X: {xy[0]}, Y: {xy[1]}")
