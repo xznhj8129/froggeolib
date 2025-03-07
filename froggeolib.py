@@ -578,13 +578,13 @@ def get_easting_letters(zone: int) -> str:
     else:  # mod == 0
         return "STUVWXYZ"
 
-# Northing letters are fixed for all zones.
-NORTHING_LETTERS = "ABCDEFGHJKLMNPQRSTUV"  # 20 letters (I and O are omitted)
-
-def parse_mgrs(mgrs_str: str, precision: int = None):
+# Northing letters are fixed for all zones (I and O are omitted).
+NORTHING_LETTERS = "ABCDEFGHJKLMNPQRSTUV"  # 20 letters
+def parse_mgrs(mgrs_str: str, precision: int = 5):
     """
     Parse an MGRS string into its components:
       - zone (int)
+      - band (str): the latitude band letter
       - grid (2-letter string)
       - easting offset (int)
       - northing offset (int)
@@ -592,15 +592,14 @@ def parse_mgrs(mgrs_str: str, precision: int = None):
 
     The input MGRS string is assumed to be in the form:
          <zone><lat_band><grid><easting><northing>
-    For example, "33RWH8359618530" means:
-         Zone = 33, Band = R (ignored), Grid = WH, 
-         Easting = 83596, Northing = 18530
+    For example, "34PDC8916750515" means:
+         Zone = 34, Band = P, Grid = DC, 
+         Easting = 89167, Northing = 50515
 
-    If precision is not provided or doesn’t match the numeric part,
-    the numeric precision is auto-detected from the string.
+    Returns:
+         (zone, band, grid, easting, northing, precision)
     """
     mgrs_str = mgrs_str.strip().upper()
-    # Extract the zone (one or two digits)
     i = 0
     while i < len(mgrs_str) and mgrs_str[i].isdigit():
         i += 1
@@ -608,19 +607,16 @@ def parse_mgrs(mgrs_str: str, precision: int = None):
         raise ValueError("Invalid MGRS string: no zone digits found")
     zone = int(mgrs_str[:i])
     
-    # Next character: latitude band (ignored in the binary encoding)
     if i >= len(mgrs_str):
         raise ValueError("Invalid MGRS string: missing latitude band")
     band = mgrs_str[i]
     i += 1
 
-    # Next two characters: the 100 km grid designator.
     if i + 1 >= len(mgrs_str):
         raise ValueError("Invalid MGRS string: missing 100km grid letters")
     grid = mgrs_str[i:i+2]
     i += 2
 
-    # The remaining digits represent the easting and northing offsets.
     numeric_len = len(mgrs_str) - i
     if numeric_len % 2 != 0:
         raise ValueError("Numeric part length is not even.")
@@ -634,23 +630,22 @@ def parse_mgrs(mgrs_str: str, precision: int = None):
     easting = int(easting_str)
     northing = int(northing_str)
     
-    return zone, grid, easting, northing, precision
+    return zone, band, grid, easting, northing, precision
 
-def encode_mgrs_binary(mgrs_str: str, precision: int = None) -> bytes:
+def encode_mgrs_binary(mgrs_str: str, precision: int = 5) -> bytes:
     """
     Encode a full MGRS string into a compact binary format.
     
     Layout:
       • 1 byte for the UTM zone
+      • 1 byte for the latitude band
       • 1 byte for the 100km grid designator (both letters encoded into one byte)
       • <bits_needed> bits for the easting offset
       • <bits_needed> bits for the northing offset
       
     bits_needed = ceil(log2(10^precision))
-    
-    The latitude band is not stored; a placeholder is used on decode.
     """
-    zone, grid, easting, northing, actual_precision = parse_mgrs(mgrs_str, precision)
+    zone, band, grid, easting, northing, actual_precision = parse_mgrs(mgrs_str, precision)
     
     # Determine grid letters based on zone.
     valid_easting_letters = get_easting_letters(zone)
@@ -671,26 +666,27 @@ def encode_mgrs_binary(mgrs_str: str, precision: int = None) -> bytes:
     max_value = 10 ** actual_precision
     bits_needed = math.ceil(math.log2(max_value))
     
-    total_bits = 16 + 2 * bits_needed  # 8 bits for zone, 8 for grid_index
+    # New total layout: 8 bits for zone, 8 bits for band, 8 bits for grid_index, plus 2*bits_needed bits.
+    total_bits = 8 + 8 + 8 + 2 * bits_needed
     total_bytes = (total_bits + 7) // 8
     
-    combined = (zone & 0xFF) << (8 + 2 * bits_needed)
+    combined = (zone & 0xFF) << (16 + 2 * bits_needed)
+    combined |= (ord(band) & 0xFF) << (8 + 2 * bits_needed)
     combined |= (grid_index & 0xFF) << (2 * bits_needed)
     combined |= (easting & ((1 << bits_needed) - 1)) << bits_needed
     combined |= (northing & ((1 << bits_needed) - 1))
     
     return combined.to_bytes(total_bytes, byteorder='big')
 
-def decode_mgrs_binary(data: bytes, precision: int) -> str:
+def decode_mgrs_binary(data: bytes, precision: int = 5) -> str:
     """
     Decode a full binary MGRS representation back into an MGRS string.
     
     Returned string is of the form:
-         <zone><band_placeholder><grid><easting><northing>
-    (The latitude band is not stored; "X" is used as a placeholder.)
+         <zone><band><grid><easting><northing>
     """
     bits_needed = math.ceil(math.log2(10 ** precision))
-    total_bits = 16 + 2 * bits_needed
+    total_bits = 8 + 8 + 8 + 2 * bits_needed
     total_bytes = (total_bits + 7) // 8
     if len(data) != total_bytes:
         raise ValueError("Invalid data length for the specified precision")
@@ -703,7 +699,10 @@ def decode_mgrs_binary(data: bytes, precision: int) -> str:
     easting = combined & northing_mask
     combined //= (1 << bits_needed)
     grid_index = combined & 0xFF
-    combined //= (1 << 8)
+    combined //= 256
+    band_byte = combined & 0xFF
+    band = chr(band_byte)
+    combined //= 256
     zone = combined & 0xFF
     
     valid_easting_letters = get_easting_letters(zone)
@@ -721,8 +720,9 @@ def decode_mgrs_binary(data: bytes, precision: int) -> str:
     grid = easting_letter + northing_letter
     easting_str = str(easting).zfill(precision)
     northing_str = str(northing).zfill(precision)
-    mgrs_str = f"{zone}X{grid}{easting_str}{northing_str}"
+    mgrs_str = f"{zone}{band}{grid}{easting_str}{northing_str}"
     return mgrs_str
+
 
 def encode_relative_mgrs_binary(mgrs_str: str, precision: int = None, omit_zone: bool = False, omit_grid: bool = False) -> bytes:
     """
@@ -731,6 +731,7 @@ def encode_relative_mgrs_binary(mgrs_str: str, precision: int = None, omit_zone:
 
     Layout order:
       • [Zone] (8 bits)  -- if not omitted
+      • [Band] (8 bits)  -- always included
       • [Grid index] (8 bits) -- if not omitted
       • [Easting offset] (<bits_needed> bits)
       • [Northing offset] (<bits_needed> bits)
@@ -744,7 +745,7 @@ def encode_relative_mgrs_binary(mgrs_str: str, precision: int = None, omit_zone:
     Returns:
       A byte string representing the compact encoding.
     """
-    zone, grid, easting, northing, actual_precision = parse_mgrs(mgrs_str, precision)
+    zone, band, grid, easting, northing, actual_precision = parse_mgrs(mgrs_str, precision)
     
     valid_easting_letters = get_easting_letters(zone)
     easting_letter = grid[0]
@@ -764,7 +765,7 @@ def encode_relative_mgrs_binary(mgrs_str: str, precision: int = None, omit_zone:
     max_value = 10 ** actual_precision
     bits_needed = math.ceil(math.log2(max_value))
     
-    total_bits = 2 * bits_needed
+    total_bits = 2 * bits_needed + 8  
     if not omit_grid:
         total_bits += 8
     if not omit_zone:
@@ -774,6 +775,7 @@ def encode_relative_mgrs_binary(mgrs_str: str, precision: int = None, omit_zone:
     combined = 0
     if not omit_zone:
         combined = (combined << 8) | (zone & 0xFF)
+    combined = (combined << 8) | (ord(band) & 0xFF)
     if not omit_grid:
         combined = (combined << 8) | (grid_index & 0xFF)
     combined = (combined << bits_needed) | (easting & ((1 << bits_needed) - 1))
@@ -786,15 +788,18 @@ def decode_relative_mgrs_binary(data: bytes, precision: int, default_zone: int =
     """
     Decode the relative binary MGRS representation back into an MGRS string.
     
-    If omit_zone is True, default_zone must be provided.
-    If omit_grid is True, default_grid (a 2-letter string) must be provided.
+    The encoded layout is:
+      • [Zone] (8 bits)  -- if not omitted (otherwise, default_zone must be provided)
+      • [Band] (8 bits)  -- always present
+      • [Grid index] (8 bits) -- if not omitted (otherwise, default_grid must be provided)
+      • [Easting offset] (<bits_needed> bits)
+      • [Northing offset] (<bits_needed> bits)
     
     Returns an MGRS string of the form:
-         <zone><band_placeholder><grid><easting><northing>
-    (Using "X" as a placeholder for the latitude band.)
+         <zone><band><grid><easting><northing>
     """
     bits_needed = math.ceil(math.log2(10 ** precision))
-    total_bits = 2 * bits_needed
+    total_bits = 2 * bits_needed + 8  
     if not omit_grid:
         total_bits += 8
     if not omit_zone:
@@ -808,14 +813,20 @@ def decode_relative_mgrs_binary(data: bytes, precision: int, default_zone: int =
     northing_mask = (1 << bits_needed) - 1
     northing = combined & northing_mask
     combined //= (1 << bits_needed)
+    
     easting = combined & northing_mask
     combined //= (1 << bits_needed)
     
     if not omit_grid:
         grid_index = combined & 0xFF
-        combined //= (1 << 8)
+        combined //= 256
     else:
         grid_index = None
+        
+    band_byte = combined & 0xFF
+    band = chr(band_byte)
+    combined //= 256
+    
     if not omit_zone:
         zone = combined & 0xFF
     else:
@@ -844,7 +855,7 @@ def decode_relative_mgrs_binary(data: bytes, precision: int, default_zone: int =
 
     easting_str = str(easting).zfill(precision)
     northing_str = str(northing).zfill(precision)
-    mgrs_str = f"{zone}X{grid}{easting_str}{northing_str}"
+    mgrs_str = f"{zone}{band}{grid}{easting_str}{northing_str}"
     return mgrs_str
 
 
@@ -878,32 +889,36 @@ if __name__ == "__main__":
     print('Lat/Lon binary (hex):', packed.hex(), "Length (bytes):", len(packed))
     print("-" * 40)
 
-    mgrs_precision = 4
+    mgrs_precision = 5
     full_mgrs = latlon_to_mgrs(a.lat, a.lon, precision=mgrs_precision)
     print("Full MGRS:", full_mgrs)
+    print("Precision:",mgrs_precision)
     # Encode full MGRS.
     binary_full = encode_mgrs_binary(full_mgrs)
     decoded_full = decode_mgrs_binary(binary_full, mgrs_precision)
     print("Full encoding -> binary (hex):", binary_full.hex(), "Length:", len(binary_full), "bytes")
     print("Decoded full MGRS:", decoded_full)
+    print("Back to GPS:", mgrs_to_latlon(decoded_full))
     print("-" * 40)
     
     # Now, encode relative MGRS omitting the GZD (zone) only.
     binary_relative_zone = encode_relative_mgrs_binary(full_mgrs, precision=mgrs_precision, omit_zone=True, omit_grid=False)
-    # Extract default zone using parse_mgrs instead of split.
-    zone_only, _, _, _, _ = parse_mgrs(full_mgrs)
+    zone_only, _, _, _, _, _ = parse_mgrs(full_mgrs)
+
     decoded_relative_zone = decode_relative_mgrs_binary(binary_relative_zone, mgrs_precision, default_zone=zone_only, omit_zone=True, omit_grid=False)
     print("Relative (omit zone) -> binary (hex):", binary_relative_zone.hex(), "Length:", len(binary_relative_zone), "bytes")
     print("Decoded relative (zone omitted):", decoded_relative_zone)
+    print("Back to GPS:", mgrs_to_latlon(decoded_relative_zone))
     print("-" * 40)
     
     # Finally, encode relative MGRS omitting both the GZD and the grid.
     binary_relative_both = encode_relative_mgrs_binary(full_mgrs, precision=mgrs_precision, omit_zone=True, omit_grid=True)
-    # Extract default grid from the full MGRS using parse_mgrs.
-    _, full_grid, _, _, _ = parse_mgrs(full_mgrs)
+    _, _, full_grid, _, _, _ = parse_mgrs(full_mgrs)
+
     decoded_relative_both = decode_relative_mgrs_binary(binary_relative_both, mgrs_precision, default_zone=zone_only, default_grid=full_grid, omit_zone=True, omit_grid=True)
     print("Relative (omit zone & grid) -> binary (hex):", binary_relative_both.hex(), "Length:", len(binary_relative_both), "bytes")
     print("Decoded relative (zone & grid omitted):", decoded_relative_both)
+    print("Back to GPS:", mgrs_to_latlon(decoded_relative_both))
 
     print("-" * 40)
     print("MSP WP")
