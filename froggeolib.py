@@ -664,6 +664,8 @@ def encode_mgrs_binary(mgrs_str: str, precision: int = None, shorten_level: int 
     
     Returns the binary encoding as bytes.
     """
+    if precision==0 and shorten_level==3:
+        raise ValueError("Impossible precision level")
     zone, band, grid, easting, northing, actual_precision = parse_mgrs(mgrs_str, precision)
     precision = actual_precision  # use auto-detected precision if not provided
     

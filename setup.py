@@ -1,5 +1,5 @@
 import sys
-from setuptools import setup, find_packages
+from setuptools import setup
 
 if sys.version_info < (3, 8):
     sys.exit('Sorry, Python < 3.8 is not supported.')
@@ -9,7 +9,8 @@ with open("README.md", "r") as fh:
     
 setup(
     name="froggeolib",
-    packages=[package for package in find_packages()],
+    # single-file module declaration
+    py_modules=["froggeolib"],
     version="1.0",
     license="GPL",
     description="My Geospatial library",
